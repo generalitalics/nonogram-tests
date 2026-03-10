@@ -11,6 +11,8 @@ DEFAULT_USERNAME = "player1"
 
 
 # --- HTTP client ---
+# --- HTTP client ---
+
 
 @pytest.fixture(scope="session")
 def api_base_url() -> str:
