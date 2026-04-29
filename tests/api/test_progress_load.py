@@ -115,3 +115,18 @@ def test_load_success_across_difficulties(api, level_for_difficulty):
         expected_matrix=matrix_empty(3, 3),
         solution_matrix=level_info["matrix"],
     )
+
+
+@pytest.mark.smoke
+def test_load_smoke_happy_path(api, level_for_load):
+    """Smoke: load baseline level without saved progress."""
+    resp = api.progress.load(
+        username=DEFAULT_USERNAME,
+        difficulty=level_for_load["difficulty"],
+        level=level_for_load["level"],
+    )
+    assert_load_success(
+        resp,
+        expected_matrix=matrix_empty(7, 7),
+        solution_matrix=level_for_load["matrix"],
+    )
