@@ -6,6 +6,7 @@ The script stresses the hottest gameplay endpoints:
 - POST /progress/load
 
 It creates one temporary level before the run and deletes it after.
+All workers share the same username (default: player1 from test DB).
 """
 
 from __future__ import annotations
@@ -193,9 +194,9 @@ def summarize(results: List[RequestResult], elapsed_s: float) -> Dict[str, objec
 
 def run_step(
     base_url: str,
-    usernames: List[str],
+    username: str,
+    workers: int,
     difficulty: str,
-    users: int,
     run_seconds: int,
     save_pause_s: float,
     load_every_n: int,
@@ -205,14 +206,13 @@ def run_step(
     metrics = Metrics()
     started = time.perf_counter()
     try:
-        with ThreadPoolExecutor(max_workers=users) as pool:
-            for worker_id in range(users):
-                worker_username = usernames[worker_id]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for worker_id in range(workers):
                 pool.submit(
                     worker_loop,
                     worker_id,
                     base_url,
-                    worker_username,
+                    username,
                     created_difficulty,
                     created_level,
                     run_seconds,
@@ -222,7 +222,8 @@ def run_step(
                 )
         elapsed = time.perf_counter() - started
         report = summarize(metrics.snapshot(), elapsed)
-        report["users"] = users
+        report["workers"] = workers
+        report["username"] = username
         report["difficulty"] = created_difficulty
         report["level"] = created_level
         report["elapsed_s"] = round(elapsed, 2)
@@ -233,7 +234,13 @@ def run_step(
 
 
 def print_report(report: Dict[str, object]) -> None:
-    print(f"\n=== Users: {report['users']} | duration: {report['elapsed_s']}s ===")
+    print(
+        f"\n=== Workers: {report['workers']} | user: {report['username']} | "
+        f"duration: {report['elapsed_s']}s ==="
+    )
+    if report.get("total_requests", 0) == 0:
+        print("No requests recorded.")
+        return
     print(f"Total requests: {report['total_requests']}, RPS: {report['rps']:.2f}")
     print(f"Save: {report['save_requests']}, Load: {report['load_requests']}")
     print(f"Status counts: {report['status_counts']}")
@@ -243,47 +250,25 @@ def print_report(report: Dict[str, object]) -> None:
         f" mean={lat['mean']}, p50={lat['p50']}, p95={lat['p95']},"
         f" p99={lat['p99']}, max={lat['max']}"
     )
-    if report["error_samples"]:
+    if report.get("error_samples"):
         print("Error samples:")
         for item in report["error_samples"]:
             print(f"- {item}")
 
 
-def ensure_users(
-    client: httpx.Client,
-    users: int,
-    user_prefix: str,
-    password: str,
-) -> List[str]:
-    usernames = [f"{user_prefix}{idx + 1}" for idx in range(users)]
-    for username in usernames:
-        payload = {
-            "username": username,
-            "password": password,
-            "is_admin": False,
-        }
-        resp = client.post("/auth/generate", json=payload)
-        resp.raise_for_status()
-    return usernames
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Load test for nonogram backend")
     parser.add_argument("--base-url", default="http://localhost:8000")
-    parser.add_argument("--username", default="player1")
     parser.add_argument(
-        "--user-mode",
-        choices=["shared", "distinct"],
-        default="distinct",
-        help="shared=all workers use one username; distinct=unique user per worker",
+        "--username",
+        default="player1",
+        help="All concurrent workers use this user (must exist in DB)",
     )
-    parser.add_argument("--user-prefix", default="loaduser_")
-    parser.add_argument("--user-password", default="loadpass123")
     parser.add_argument("--difficulty", default="easy", choices=["easy", "medium", "hard"])
     parser.add_argument(
-        "--users-steps",
+        "--workers-steps",
         default="5,10,20,40,60",
-        help="Comma-separated concurrent users per step, e.g. 5,10,20",
+        help="Comma-separated concurrent workers per step, e.g. 5,10,20",
     )
     parser.add_argument("--duration", type=int, default=30, help="Duration per step in seconds")
     parser.add_argument(
@@ -303,52 +288,36 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    user_steps = [int(x.strip()) for x in args.users_steps.split(",") if x.strip()]
+    worker_steps = [int(x.strip()) for x in args.workers_steps.split(",") if x.strip()]
 
     print(f"Base URL: {args.base_url}")
-    print(
-        f"User mode: {args.user_mode}, "
-        f"seed user: {args.username}, difficulty: {args.difficulty}"
-    )
-    print(f"Steps: {user_steps}, duration per step: {args.duration}s")
+    print(f"User: {args.username}, difficulty: {args.difficulty}")
+    print(f"Steps: {worker_steps}, duration per step: {args.duration}s")
     print(f"Per-worker save pause: {args.save_pause}s, load every: {args.load_every}")
 
     all_reports = []
-    setup_client = httpx.Client(base_url=args.base_url, timeout=10.0)
-    max_users = max(user_steps) if user_steps else 0
-    distinct_user_pool: List[str] = []
-    if args.user_mode == "distinct":
-        distinct_user_pool = ensure_users(
-            setup_client,
-            users=max_users,
-            user_prefix=args.user_prefix,
-            password=args.user_password,
-        )
-
-    for users in user_steps:
-        if args.user_mode == "shared":
-            usernames = [args.username] * users
-        else:
-            usernames = distinct_user_pool[:users]
+    for workers in worker_steps:
         report = run_step(
             base_url=args.base_url,
-            usernames=usernames,
+            username=args.username,
+            workers=workers,
             difficulty=args.difficulty,
-            users=users,
             run_seconds=args.duration,
             save_pause_s=args.save_pause,
             load_every_n=args.load_every,
         )
         print_report(report)
         all_reports.append(report)
-    setup_client.close()
 
     print("\n=== Compact summary ===")
     for r in all_reports:
+        if r.get("total_requests", 0) == 0:
+            print(f"workers={r['workers']:>3} | no data")
+            continue
         status_counts = r["status_counts"]
         failures = sum(v for k, v in status_counts.items() if k not in (200, 429))
         print(
-            f"users={r['users']:>3} | rps={r['rps']:.1f} | "
+            f"workers={r['workers']:>3} | rps={r['rps']:.1f} | "
             f"p95={r['latency_ms']['p95']}ms | p99={r['latency_ms']['p99']}ms | "
             f"non-200/429={failures}"
         )
